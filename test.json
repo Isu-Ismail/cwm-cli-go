@@ -1,0 +1,46 @@
+[
+    {
+        "cmd": ".\\cwm.exe save -t docker cmd1='docker ps' cmd2='docker image ls'",
+        "return": "Saved cmd1 [docker] -> docker ps\nSaved cmd2 [docker] -> docker image ls\n\nHint: Run 'cwm get cmd1' or 'cwm get' to retrieve."
+    },
+    {
+        "cmd": ".\\cwm.exe save cmd3='echo hello' -t debug cmd4='echo world' -t release",
+        "return": "Saved cmd3 [debug] -> echo hello\nSaved cmd4 [release] -> echo world\n\nHint: Run 'cwm get cmd3' or 'cwm get' to retrieve."
+    },
+    {
+        "cmd": ".\\cwm.exe config -c 'c:/Users/ismail/cwm/test_go_copy'",
+        "return": "Set copy bank path: c:/Users/ismail/cwm/test_go_copy"
+    },
+    {
+        "cmd": ".\\cwm.exe config --show",
+        "return": "Prints current Database Path, active History File, Code Theme, and configured Copy Bank Path details."
+    },
+    {
+        "cmd": ".\\cwm.exe get --tag docker -l",
+        "return": "Lists all saved commands tagged with 'docker' in a table (ID, Variable, Command, Tags) without prompts."
+    },
+    {
+        "cmd": ".\\cwm.exe get -f dock",
+        "return": "Fuzzy searches saved commands for 'dock', lists them, and prompts: 'Copy (ID):'"
+    },
+    {
+        "cmd": ".\\cwm.exe get -h -n 5",
+        "return": "Reads your actual shell history file directly, displays the latest 5 commands, and prompts: 'Copy (ID):'"
+    },
+    {
+        "cmd": ".\\cwm.exe get -h -f docker -n 10",
+        "return": "Fuzzy searches your system shell history for commands matching 'docker', lists latest 10 matches, and prompts."
+    },
+    {
+        "cmd": ".\\cwm.exe clear -s",
+        "return": "All saved commands cleared successfully."
+    },
+    {
+        "cmd": ".\\cwm.exe clear -a .",
+        "return": "Deleted X history logs for path: <current_directory_path>"
+    },
+    {
+        "cmd": ".\\cwm.exe bank info",
+        "return": "Prints details about your CWM database locations and file sizes: Global Database Path, Copy Bank Path, File Size."
+    }
+]
