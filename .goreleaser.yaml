@@ -39,11 +39,6 @@ nfpms:
     license: "MIT"
     bindir: /usr/bin
 
-wix:
-  - id: cwm
-    goos: windows
-    goarch: amd64
-
 checksum:
   name_template: 'checksums.txt'
 
