@@ -4,3 +4,9 @@ vendor/
 go.sum
 .idea/
 .vscode/
+cwm.exe
+*.exe
+*.syso
+*bad_history*
+render_logo.py
+logo_render.html

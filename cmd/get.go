@@ -131,12 +131,33 @@ func isCwmCall(s string) bool {
 	return strings.HasPrefix(s, "cwm ") || strings.HasPrefix(s, "cwm.exe ") || s == "cwm" || s == "cwm.exe"
 }
 
-func getHistoryFilePath(database *sql.DB) string {
-	path, _ := db.GetConfigValue(database, "history_file")
-	if path != "" {
-		return path
+func validateHistoryFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
 	}
+	defer file.Close()
 
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 5000 {
+			break
+		}
+		line := scanner.Text()
+		words := strings.Fields(line)
+		if len(words) > 100 {
+			return fmt.Errorf("line exceeds maximum of 100 words")
+		}
+	}
+	return scanner.Err()
+}
+
+func getDefaultHistoryFilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -163,6 +184,41 @@ func getHistoryFilePath(database *sql.DB) string {
 		}
 	}
 	return filepath.Join(home, ".bash_history")
+}
+
+func getHistoryFilePath(database *sql.DB) string {
+	path, _ := db.GetConfigValue(database, "history_file")
+	if path != "" {
+		// 1. Must be a file
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			if database != nil {
+				_ = db.SetConfigValue(database, "history_file", "")
+			}
+			return getDefaultHistoryFilePath()
+		}
+
+		// 2. Filename must contain "history"
+		filename := strings.ToLower(filepath.Base(path))
+		if !strings.Contains(filename, "history") {
+			if database != nil {
+				_ = db.SetConfigValue(database, "history_file", "")
+			}
+			return getDefaultHistoryFilePath()
+		}
+
+		// 3. Scan words limit to avoid hanging
+		if errVal := validateHistoryFile(path); errVal != nil {
+			if database != nil {
+				_ = db.SetConfigValue(database, "history_file", "")
+			}
+			return getDefaultHistoryFilePath()
+		}
+
+		return path
+	}
+
+	return getDefaultHistoryFilePath()
 }
 
 func handleSavedListLookup(database *sql.DB, search string) {
@@ -288,7 +344,7 @@ func handleHistoryLookup(database *sql.DB, search string) {
 	var lines []string
 
 	if activeFlag {
-		rows, err := database.Query("SELECT command FROM history_logs WHERE context_dir = ? ORDER BY id DESC LIMIT 5000", detectCwd())
+		rows, err := database.Query("SELECT command FROM history_logs WHERE context_dir = ? ORDER BY logged_at DESC LIMIT 5000", detectCwd())
 		if err != nil {
 			fmt.Printf(color.RedString("Error querying database history: %v\n"), err)
 			os.Exit(1)

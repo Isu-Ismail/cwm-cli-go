@@ -31,11 +31,12 @@ var saveCmd = &cobra.Command{
 		var cleanArgs []string
 
 		for _, arg := range args {
-			if arg == "-e" || arg == "--edit" {
+			switch arg {
+case "-e", "--edit":
 				editFlag = true
-			} else if arg == "-ev" || arg == "--ev" || arg == "--rename" {
+			case "-ev", "--ev", "--rename":
 				editVarnameFlag = true
-			} else {
+			default:
 				cleanArgs = append(cleanArgs, arg)
 			}
 		}

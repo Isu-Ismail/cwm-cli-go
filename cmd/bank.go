@@ -76,11 +76,26 @@ var bankDeleteCmd = &cobra.Command{
 		confirm = strings.ToLower(strings.TrimSpace(confirm))
 
 		if confirm == "y" || confirm == "yes" {
+			// Get copy_bank_path config value before deleting
+			var copyBankPath string
+			database, errDb := db.InitDB()
+			if errDb == nil {
+				copyBankPath, _ = db.GetConfigValue(database, "copy_bank_path")
+				database.Close()
+			}
+
 			err := os.RemoveAll(folderPath)
 			if err != nil {
 				fmt.Printf("\n  %s %v\n\n", color.RedString("Error deleting bank:"), err)
 			} else {
-				fmt.Printf("\n  %s\n\n", color.GreenString("Deleted global CWM database and folder."))
+				fmt.Printf("\n  %s\n", color.GreenString("Deleted global CWM database and folder."))
+				if copyBankPath != "" {
+					copyDbFile := filepath.Join(copyBankPath, "cwm.db")
+					if errCopy := os.Remove(copyDbFile); errCopy == nil {
+						fmt.Printf("  Deleted copy bank database file: %s\n", copyDbFile)
+					}
+				}
+				fmt.Println()
 			}
 		} else {
 			fmt.Println("\n  Cancelled.")

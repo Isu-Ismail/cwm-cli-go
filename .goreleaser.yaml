@@ -1,0 +1,50 @@
+version: 2
+
+project_name: cwm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    dir: .
+    binary: cwm
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+nfpms:
+  - id: cwm
+    package_name: cwm
+    formats:
+      - deb
+      - rpm
+    vendor: "Isu-Ismail"
+    homepage: "https://github.com/Isu-Ismail/cwm-cli-go"
+    maintainer: "Ismail <ismailisims1@gmail.com>"
+    description: "Command Watch Manager (CWM) CLI"
+    license: "MIT"
+    bindir: /usr/bin
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
