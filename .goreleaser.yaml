@@ -1,4 +1,4 @@
-version: 2
+version: 1
 
 project_name: cwm
 
@@ -38,6 +38,11 @@ nfpms:
     description: "Command Watch Manager (CWM) CLI"
     license: "MIT"
     bindir: /usr/bin
+
+wixes:
+  - id: cwm
+    goos: windows
+    goarch: amd64
 
 checksum:
   name_template: 'checksums.txt'
