@@ -39,7 +39,7 @@ nfpms:
     license: "MIT"
     bindir: /usr/bin
 
-wixes:
+wix:
   - id: cwm
     goos: windows
     goarch: amd64
