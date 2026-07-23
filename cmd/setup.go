@@ -9,51 +9,117 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
 var forceSetupFlag bool
 
+const WrapperVersionHeader = "# --- CWM Shell Wrapper v1.0.0 (build:20260723) ---"
+const WrapperVersionFooter = "# --- End CWM Shell Wrapper ---"
+
 const (
 	bashConfig = `
-# --- CWM History Setup ---
-# Append to history file immediately, don't overwrite
+# --- CWM Shell Wrapper v1.0.0 (build:20260723) ---
 shopt -s histappend
-# Instant write to disk after every command
 export PROMPT_COMMAND="history -a; $PROMPT_COMMAND"
-# Ignore duplicate commands and commands starting with space
 export HISTCONTROL=ignoreboth
+
+# Native CWM Execution Shell Function
+cwm() {
+    if [ "$1" = "exec" ] || [[ " $* " =~ " -x " ]] || [[ " $* " =~ " --exec " ]]; then
+        local clean_args=()
+        for arg in "$@"; do
+            if [ "$arg" != "-x" ] && [ "$arg" != "--exec" ] && [ "$arg" != "exec" ] && [ "$arg" != "get" ]; then
+                clean_args+=("$arg")
+            fi
+        done
+        if [ ${#clean_args[@]} -eq 0 ]; then
+            command cwm "$@"
+        else
+            local cmd
+            cmd=$(command cwm get --show "${clean_args[@]}")
+            if [ -n "$cmd" ]; then
+                eval "$cmd"
+            fi
+        fi
+    else
+        command cwm "$@"
+    fi
+}
+# --- End CWM Shell Wrapper ---
 `
 	zshConfig = `
-# --- CWM History Setup ---
+# --- CWM Shell Wrapper v1.0.0 (build:20260723) ---
 HISTFILE="$HOME/.zsh_history"
-# Keep 50k commands in memory and on disk
 HISTSIZE=50000
 SAVEHIST=50000
-# Write commands immediately after each execution
 setopt INC_APPEND_HISTORY
-# Ignore duplicates and commands starting with space
 setopt HIST_IGNORE_DUPS
 setopt HIST_IGNORE_ALL_DUPS
 setopt HIST_IGNORE_SPACE
-# Disable extended timestamp format (Clean raw commands)
 unsetopt EXTENDED_HISTORY
 setopt NO_EXTENDED_HISTORY
+
+# Native CWM Execution Shell Function
+cwm() {
+    if [ "$1" = "exec" ] || [[ " $* " =~ " -x " ]] || [[ " $* " =~ " --exec " ]]; then
+        local clean_args=()
+        for arg in "$@"; do
+            if [ "$arg" != "-x" ] && [ "$arg" != "--exec" ] && [ "$arg" != "exec" ] && [ "$arg" != "get" ]; then
+                clean_args+=("$arg")
+            fi
+        done
+        if [ ${#clean_args[@]} -eq 0 ]; then
+            command cwm "$@"
+        else
+            local cmd
+            cmd=$(command cwm get --show "${clean_args[@]}")
+            if [ -n "$cmd" ]; then
+                eval "$cmd"
+            fi
+        fi
+    else
+        command cwm "$@"
+    fi
+}
+# --- End CWM Shell Wrapper ---
 `
 	pwshConfig = `
-# --- CWM History Setup ---
-# Ensure commands are saved immediately
+# --- CWM Shell Wrapper v1.0.0 (build:20260723) ---
 Set-PSReadLineOption -HistorySaveStyle SaveIncrementally
-# Prevent duplicates in history
 Set-PSReadLineOption -HistoryNoDuplicates
+
+# Native CWM Execution Shell Function
+function cwm {
+    if ($args.Count -gt 0 -and ($args -contains '-x' -or $args -contains '--exec' -or $args[0] -eq 'exec')) {
+        $cleanArgs = @()
+        foreach ($a in $args) {
+            if ($a -ne '-x' -and $a -ne '--exec' -and $a -ne 'exec' -and $a -ne 'get') {
+                $cleanArgs += $a
+            }
+        }
+        if ($cleanArgs.Count -eq 0) {
+            & cwm.exe @args
+        } else {
+            $cmd = & cwm.exe get --show @cleanArgs
+            if ($cmd) {
+                Invoke-Expression $cmd
+            }
+        }
+    } else {
+        & cwm.exe @args
+    }
+}
+# --- End CWM Shell Wrapper ---
 `
 )
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Configure shell for history synchronization",
-	Long:  `Configures your shell (Bash, Zsh, or PowerShell) profile for instant history synchronization and deduplication.`,
+	Short: "Configure shell for history synchronization and native execution",
+	Long:  `Configures your shell (Bash, Zsh, or PowerShell) profile for instant history synchronization and native shell execution (cd, env vars).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -78,9 +144,9 @@ var setupCmd = &cobra.Command{
 
 			switch choice {
 			case "1":
-				appendConfigBlock(bashrc, bashConfig, "Bash")
+				updateOrAppendCwmBlock(bashrc, bashConfig, "Bash")
 			case "2":
-				appendConfigBlock(zshrc, zshConfig, "Zsh")
+				updateOrAppendCwmBlock(zshrc, zshConfig, "Zsh")
 			case "3":
 				setupPowershellHistory()
 			default:
@@ -95,7 +161,7 @@ var setupCmd = &cobra.Command{
 			isGitBash := os.Getenv("MSYSTEM") != "" || strings.Contains(strings.ToLower(os.Getenv("SHELL")), "bash")
 			if isGitBash {
 				fmt.Println(color.CyanString("Detected Git Bash."))
-				appendConfigBlock(bashrc, bashConfig, "Git Bash")
+				updateOrAppendCwmBlock(bashrc, bashConfig, "Git Bash")
 			} else {
 				fmt.Println(color.CyanString("Detected Windows System."))
 				setupPowershellHistory()
@@ -106,18 +172,17 @@ var setupCmd = &cobra.Command{
 		switch shellType {
 		case "zsh":
 			fmt.Println(color.CyanString("Detected Zsh."))
-			appendConfigBlock(zshrc, zshConfig, "Zsh")
+			updateOrAppendCwmBlock(zshrc, zshConfig, "Zsh")
 		case "bash":
 			fmt.Println(color.CyanString("Detected Bash."))
-			appendConfigBlock(bashrc, bashConfig, "Bash")
+			updateOrAppendCwmBlock(bashrc, bashConfig, "Bash")
 		default:
-			// Fallback checks
 			if _, err := os.Stat(zshrc); err == nil {
 				fmt.Println("Found .zshrc, configuring Zsh...")
-				appendConfigBlock(zshrc, zshConfig, "Zsh")
+				updateOrAppendCwmBlock(zshrc, zshConfig, "Zsh")
 			} else if _, err := os.Stat(bashrc); err == nil {
 				fmt.Println("Found .bashrc, configuring Bash...")
-				appendConfigBlock(bashrc, bashConfig, "Bash")
+				updateOrAppendCwmBlock(bashrc, bashConfig, "Bash")
 			} else {
 				fmt.Println("! Could not auto-detect shell config file.")
 				fmt.Println("  Run " + color.New(color.Bold).Sprint("cwm setup --force") + " to choose manually.")
@@ -126,38 +191,75 @@ var setupCmd = &cobra.Command{
 	},
 }
 
-func appendConfigBlock(filePath string, block string, shellName string) {
-	// Create file and folders if missing
+func updateOrAppendCwmBlock(filePath string, newBlock string, shellName string) {
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Printf(color.RedString("Error creating folder %s: %v\n"), dir, err)
 		return
 	}
 
-	contentBytes, _ := os.ReadFile(filePath)
-	content := string(contentBytes)
+	contentBytes, err := os.ReadFile(filePath)
+	content := ""
+	if err == nil {
+		content = string(contentBytes)
+	}
 
-	if strings.Contains(content, "# --- CWM History Setup ---") {
-		fmt.Printf(color.GreenString("Success: ")+"%s is already configured in %s.\n", shellName, filepath.Base(filePath))
+	// Check if already up to date with exact Header
+	if strings.Contains(content, WrapperVersionHeader) {
+		fmt.Printf(color.GreenString("Success: ")+"%s profile is up to date in %s.\n", shellName, filepath.Base(filePath))
 		return
 	}
 
-	fmt.Printf("Configuring %s...\n", shellName)
+	lines := strings.Split(content, "\n")
+	var newLines []string
+	inCwmBlock := false
+	replacedBlock := false
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "# --- CWM Shell Wrapper") || strings.HasPrefix(trimmed, "# --- CWM") {
+			inCwmBlock = true
+			if !replacedBlock {
+				newLines = append(newLines, strings.TrimSpace(newBlock))
+				replacedBlock = true
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "# --- End CWM Shell Wrapper") || strings.HasPrefix(trimmed, "# --- End CWM") {
+			inCwmBlock = false
+			continue
+		}
+
+		if inCwmBlock {
+			continue
+		}
+
+		// Keep ALL non-CWM lines untouched (Oh My Posh, starship, custom aliases, etc.)
+		newLines = append(newLines, line)
+	}
+
+	finalContent := strings.Join(newLines, "\n")
+	if !replacedBlock {
+		if strings.TrimSpace(finalContent) != "" && !strings.HasSuffix(finalContent, "\n") {
+			finalContent += "\n\n"
+		} else if strings.TrimSpace(finalContent) != "" {
+			finalContent += "\n"
+		}
+		finalContent += strings.TrimSpace(newBlock) + "\n"
+	}
+
+	errWrite := os.WriteFile(filePath, []byte(finalContent), 0644)
+	if errWrite != nil {
+		fmt.Printf(color.RedString("Error writing profile %s: %v\n"), filePath, errWrite)
+		return
+	}
+
+	fmt.Printf(color.GreenString("Configured %s:\n"), shellName)
 	fmt.Printf("  Target: %s\n", filePath)
 
-	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Printf(color.RedString("Error opening file: %v\n"), err)
-		return
-	}
-	defer f.Close()
-
-	if _, err := f.WriteString("\n" + strings.TrimSpace(block) + "\n"); err != nil {
-		fmt.Printf(color.RedString("Error writing to file: %v\n"), err)
-		return
-	}
-
-	// Update default database configs history_file path if empty
 	database, errDb := db.InitDB()
 	if errDb == nil {
 		defer database.Close()
@@ -178,7 +280,16 @@ func appendConfigBlock(filePath string, block string, shellName string) {
 		}
 	}
 
-	fmt.Println(color.GreenString("Done! ") + "Please restart your " + shellName + " terminal.")
+	if shellName == "Bash" || shellName == "Git Bash" || shellName == "Zsh" {
+		reloadCmd := "source ~/.bashrc"
+		if shellName == "Zsh" {
+			reloadCmd = "source ~/.zshrc"
+		}
+		if errClip := clipboard.WriteAll(reloadCmd); errClip == nil {
+			fmt.Printf(color.GreenString("Copied reload command '%s' to clipboard!\n"), reloadCmd)
+			fmt.Println("Paste (Ctrl+V) and press Enter to activate your profile immediately.")
+		}
+	}
 }
 
 func setupPowershellHistory() {
@@ -194,7 +305,7 @@ func setupPowershellHistory() {
 	configured := false
 	if _, err := os.Stat(psPath); err == nil {
 		profile := filepath.Join(psPath, "Microsoft.PowerShell_profile.ps1")
-		appendConfigBlock(profile, pwshConfig, "PowerShell (Core)")
+		updateOrAppendCwmBlock(profile, pwshConfig, "PowerShell (Core)")
 		configured = true
 
 		database, errDb := db.InitDB()
@@ -213,13 +324,21 @@ func setupPowershellHistory() {
 
 	if _, err := os.Stat(legacyPath); err == nil {
 		profile := filepath.Join(legacyPath, "Microsoft.PowerShell_profile.ps1")
-		appendConfigBlock(profile, pwshConfig, "WindowsPowerShell (Legacy)")
+		updateOrAppendCwmBlock(profile, pwshConfig, "WindowsPowerShell (Legacy)")
 		configured = true
 	}
 
 	if !configured {
 		profile := filepath.Join(psPath, "Microsoft.PowerShell_profile.ps1")
-		appendConfigBlock(profile, pwshConfig, "PowerShell")
+		updateOrAppendCwmBlock(profile, pwshConfig, "PowerShell")
+	}
+
+	reloadCmd := ". $PROFILE"
+	if errClip := clipboard.WriteAll(reloadCmd); errClip == nil {
+		fmt.Printf(color.GreenString("Copied reload command '%s' to clipboard!\n"), reloadCmd)
+		fmt.Println("Paste (Ctrl+V) and press Enter to activate your profile immediately.")
+	} else {
+		fmt.Println(color.GreenString("Done! ") + "Please run: " + color.CyanString(reloadCmd))
 	}
 }
 

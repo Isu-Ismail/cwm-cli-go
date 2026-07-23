@@ -17,7 +17,7 @@ var helloCmd = &cobra.Command{
 	Short: "System diagnostics",
 	Run: func(cmd *cobra.Command, args []string) {
 		// 1. Version
-		fmt.Printf("%s\n", color.New(color.Bold, color.FgGreen).Sprint("CWM v2.0"))
+		fmt.Printf("%s\n", color.New(color.Bold, color.FgGreen).Sprintf("CWM %s", Version))
 
 		// 2. System Info
 		fmt.Printf("%s  %s %s\n", color.New(color.Bold, color.FgBlue).Sprint("System:"), runtime.GOOS, runtime.GOARCH)

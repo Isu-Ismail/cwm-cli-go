@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -25,7 +27,10 @@ var (
 	activeFlag bool
 	countFlag  int
 	fuzzyFlag  bool
+	execFlag   bool
 )
+
+var placeholderRegex = regexp.MustCompile(`%[a-zA-Z0-9_]+%|\{\{[a-zA-Z0-9_]+\}\}`)
 
 var getCmd = &cobra.Command{
 	Use:   "get [variable_name_or_id]",
@@ -62,29 +67,246 @@ var getCmd = &cobra.Command{
 	},
 }
 
-func handleSingleFetch(database *sql.DB, search string) {
-	var commandVal string
-	// Query by variable name directly
-	err := database.QueryRow("SELECT command FROM saved_commands WHERE variable = ?", search).Scan(&commandVal)
+func extractScriptPlaceholders(cmdStr string) ([]string, string) {
+	var fileMatches []string
+	var scriptPath string
+	if strings.Contains(cmdStr, "scripts/") || strings.Contains(cmdStr, "scripts\\") || strings.Contains(cmdStr, ".sh") || strings.Contains(cmdStr, ".ps1") {
+		words := strings.Fields(cmdStr)
+		for _, w := range words {
+			cleanW := strings.Trim(w, `"'`)
+			if strings.HasSuffix(cleanW, ".sh") || strings.HasSuffix(cleanW, ".ps1") {
+				scriptPath = cleanW
+				if data, err := os.ReadFile(cleanW); err == nil {
+					fileMatches = placeholderRegex.FindAllString(string(data), -1)
+				}
+				break
+			}
+		}
+	}
+	return fileMatches, scriptPath
+}
 
-	if err == sql.ErrNoRows {
-		fmt.Printf(color.RedString("Error: Command '%s' not found.\n"), search)
-		os.Exit(1)
-	} else if err != nil {
+func resolvePlaceholders(cmdStr string) string {
+	matches := placeholderRegex.FindAllString(cmdStr, -1)
+	scriptMatches, _ := extractScriptPlaceholders(cmdStr)
+	matches = append(matches, scriptMatches...)
+
+	if len(matches) == 0 {
+		return cmdStr
+	}
+
+	seen := make(map[string]bool)
+	var uniqueVars []string
+	for _, m := range matches {
+		if !seen[m] {
+			seen[m] = true
+			uniqueVars = append(uniqueVars, m)
+		}
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	replaced := cmdStr
+
+	for _, varPlaceholder := range uniqueVars {
+		fmt.Fprintf(os.Stderr, "Enter value for %s: ", color.CyanString(varPlaceholder))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimRight(input, "\r\n")
+
+		if strings.Contains(replaced, varPlaceholder) {
+			replaced = strings.ReplaceAll(replaced, varPlaceholder, input)
+		} else {
+			replaced = fmt.Sprintf("%s \"%s\"", replaced, input)
+		}
+	}
+	return replaced
+}
+
+func validateScriptFileExists(cmdStr string) (string, bool) {
+	if strings.Contains(cmdStr, "scripts/") || strings.Contains(cmdStr, "scripts\\") || strings.Contains(cmdStr, ".sh") || strings.Contains(cmdStr, ".ps1") {
+		words := strings.Fields(cmdStr)
+		for _, w := range words {
+			cleanW := strings.Trim(w, `"'`)
+			if strings.HasSuffix(cleanW, ".sh") || strings.HasSuffix(cleanW, ".ps1") {
+				if _, err := os.Stat(cleanW); os.IsNotExist(err) {
+					return cleanW, false
+				}
+			}
+		}
+	}
+	return "", true
+}
+
+func outputOrCopyCommand(cmdStr string, descStr string, choiceLabel string) {
+	if scriptPath, valid := validateScriptFileExists(cmdStr); !valid {
+		fmt.Fprintf(os.Stderr, color.RedString("Error: Script file not found at: %s\n"), scriptPath)
+		fmt.Fprintln(os.Stderr, color.YellowString("Notice: Direct execution (-x) is not setup yet or the script file is missing."))
+		fmt.Fprintln(os.Stderr, "If you want native execution (-x), run: "+color.GreenString("cwm setup"))
+		fmt.Fprintln(os.Stderr, "To view or copy the command, use normal get: "+color.CyanString("cwm get <variable_name>"))
+		return
+	}
+
+	cmdStr = resolvePlaceholders(cmdStr)
+
+	if execFlag {
+		if descStr != "" {
+			fmt.Fprintf(os.Stderr, "%s %s\n", color.New(color.Bold, color.FgCyan).Sprint("Description:"), descStr)
+		}
+
+		trimmedCmd := strings.TrimSpace(cmdStr)
+		if strings.HasPrefix(trimmedCmd, "cd ") || strings.HasPrefix(trimmedCmd, "set ") || strings.HasPrefix(trimmedCmd, "export ") || strings.HasPrefix(trimmedCmd, "$env:") {
+			fmt.Fprintln(os.Stderr, color.YellowString("Notice: Running 'cd' or environment commands via -x requires shell profile setup to change your active prompt."))
+			fmt.Fprintln(os.Stderr, "Run "+color.GreenString("cwm setup")+" and reload your profile to enable native prompt navigation.\n")
+		}
+
+		fmt.Fprintln(os.Stderr, color.GreenString("Executing command: ")+cmdStr)
+		executeCommandInTerminal(cmdStr)
+		return
+	}
+
+	if showFlag {
+		fmt.Print(cmdStr)
+		if !strings.HasSuffix(cmdStr, "\n") {
+			fmt.Println()
+		}
+		return
+	}
+
+	if err := clipboard.WriteAll(cmdStr); err != nil {
+			fmt.Printf(color.YellowString("Warning: Failed to copy to clipboard: %v\n"), err)
+			if descStr != "" {
+				fmt.Printf("%s %s\n", color.New(color.Bold, color.FgCyan).Sprint("Description:"), descStr)
+			}
+			fmt.Print(cmdStr)
+			if !strings.HasSuffix(cmdStr, "\n") {
+				fmt.Println()
+			}
+		} else {
+			if descStr != "" {
+				fmt.Printf("%s %s\n", color.New(color.Bold, color.FgCyan).Sprint("Description:"), descStr)
+			}
+			if choiceLabel != "" {
+				fmt.Printf(color.GreenString("Copied command #%s -> "), choiceLabel)
+			} else {
+				fmt.Print(color.GreenString("Copied to clipboard! "))
+			}
+			if strings.Contains(cmdStr, "\n") {
+				lines := strings.Split(cmdStr, "\n")
+				fmt.Printf("%s ... [%d lines]\n", lines[0], len(lines))
+			} else {
+				fmt.Println(cmdStr)
+			}
+		}
+}
+
+func parseCommandArgs(cmdStr string) (string, []string) {
+	var args []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+
+	for _, r := range cmdStr {
+		switch {
+		case inQuote:
+			if r == quoteChar {
+				inQuote = false
+			} else {
+				current.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			inQuote = true
+			quoteChar = r
+		case r == ' ' || r == '\t':
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+
+	if len(args) == 0 {
+		return "", nil
+	}
+	return args[0], args[1:]
+}
+
+func executeCommandInTerminal(cmdStr string) {
+	shType := detectShell()
+	var execCmd *exec.Cmd
+
+	trimmed := strings.TrimSpace(cmdStr)
+
+	// If command is an explicit shell executable invocation (e.g. powershell -ExecutionPolicy ... or bash path/to/script.sh), run directly!
+	if strings.HasPrefix(trimmed, "powershell ") || strings.HasPrefix(trimmed, "pwsh ") || strings.HasPrefix(trimmed, "bash ") || strings.HasPrefix(trimmed, "zsh ") {
+		bin, args := parseCommandArgs(trimmed)
+		execCmd = exec.Command(bin, args...)
+	} else if runtime.GOOS == "windows" {
+		if shType == "pwsh" || shType == "powershell" {
+			execCmd = exec.Command("powershell", "-NoProfile", "-Command", cmdStr)
+		} else {
+			execCmd = exec.Command("cmd.exe", "/c", cmdStr)
+		}
+	} else {
+		if shType == "zsh" {
+			execCmd = exec.Command("zsh", "-c", cmdStr)
+		} else {
+			execCmd = exec.Command("bash", "-c", cmdStr)
+		}
+	}
+
+	execCmd.Stdin = os.Stdin
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+
+	if err := execCmd.Run(); err != nil {
+		fmt.Printf(color.RedString("\nCommand finished with error: %v\n"), err)
+	}
+}
+
+func handleSingleFetch(database *sql.DB, search string) {
+	var commandVal, descVal string
+	// Query by variable name directly
+	err := database.QueryRow("SELECT command, description FROM saved_commands WHERE variable = ?", search).Scan(&commandVal, &descVal)
+
+	if err == nil {
+		outputOrCopyCommand(commandVal, descVal, "")
+		return
+	}
+
+	if err != sql.ErrNoRows {
 		fmt.Printf(color.RedString("Error searching command: %v\n"), err)
 		os.Exit(1)
 	}
 
-	if showFlag {
-		fmt.Println(commandVal)
-	} else {
-		if err := clipboard.WriteAll(commandVal); err != nil {
-			fmt.Printf(color.YellowString("Warning: Failed to write to clipboard: %v\n"), err)
-			fmt.Println(commandVal)
-		} else {
-			fmt.Printf(color.GreenString("Copied to clipboard! ") + "%s\n", commandVal)
+	// Exact match not found: check if any fuzzy/substring suggestions exist
+	rows, errQuery := database.Query("SELECT variable, command, tags, description FROM saved_commands")
+	if errQuery == nil {
+		defer rows.Close()
+		searchLower := strings.ToLower(search)
+		matchCount := 0
+		for rows.Next() {
+			var v, c, t, d string
+			if errScan := rows.Scan(&v, &c, &t, &d); errScan == nil {
+				if strings.Contains(strings.ToLower(v), searchLower) || matchesFuzzy(v, searchLower) ||
+					strings.Contains(strings.ToLower(c), searchLower) || matchesFuzzy(c, searchLower) ||
+					strings.Contains(strings.ToLower(d), searchLower) || matchesFuzzy(d, searchLower) {
+					matchCount++
+				}
+			}
+		}
+		if err := rows.Err(); err == nil && matchCount > 0 {
+			fmt.Printf(color.YellowString("Command '%s' not found. Showing matching suggestions:\n"), search)
+			handleSavedListLookup(database, search)
+			return
 		}
 	}
+
+	fmt.Printf(color.RedString("Error: Command '%s' not found.\n"), search)
+	os.Exit(1)
 }
 
 func fuzzyPattern(search string) string {
@@ -225,12 +447,22 @@ func handleSavedListLookup(database *sql.DB, search string) {
 	var rows *sql.Rows
 	var err error
 
-	if search != "" && fuzzyFlag {
-		query := "SELECT variable, command, tags FROM saved_commands WHERE variable LIKE ? OR command LIKE ? ORDER BY created_at ASC"
+	if search != "" {
 		pattern := fuzzyPattern(search)
-		rows, err = database.Query(query, pattern, pattern)
+		query := "SELECT variable, command, tags, description FROM saved_commands WHERE variable LIKE ? OR command LIKE ? OR description LIKE ? OR tags LIKE ? ORDER BY created_at ASC"
+		rows, err = database.Query(query, pattern, pattern, pattern, pattern)
+		if err != nil || !rows.Next() {
+			if rows != nil {
+				rows.Close()
+			}
+			query = "SELECT variable, command, tags, description FROM saved_commands ORDER BY created_at ASC"
+			rows, err = database.Query(query)
+		} else {
+			rows.Close()
+			rows, err = database.Query(query, pattern, pattern, pattern, pattern)
+		}
 	} else {
-		query := "SELECT variable, command, tags FROM saved_commands ORDER BY created_at ASC"
+		query := "SELECT variable, command, tags, description FROM saved_commands ORDER BY created_at ASC"
 		rows, err = database.Query(query)
 	}
 
@@ -241,17 +473,29 @@ func handleSavedListLookup(database *sql.DB, search string) {
 	defer rows.Close()
 
 	type cmdItem struct {
-		varName string
-		cmdStr  string
-		tags    string
+		varName     string
+		cmdStr      string
+		tags        string
+		description string
 	}
 
 	var items []cmdItem
 	tagMatchedAny := false
 	for rows.Next() {
 		var item cmdItem
-		if err := rows.Scan(&item.varName, &item.cmdStr, &item.tags); err != nil {
+		if err := rows.Scan(&item.varName, &item.cmdStr, &item.tags, &item.description); err != nil {
 			continue
+		}
+
+		if search != "" {
+			searchLower := strings.ToLower(search)
+			vMatch := strings.Contains(strings.ToLower(item.varName), searchLower) || matchesFuzzy(item.varName, searchLower)
+			cMatch := strings.Contains(strings.ToLower(item.cmdStr), searchLower) || matchesFuzzy(item.cmdStr, searchLower)
+			dMatch := strings.Contains(strings.ToLower(item.description), searchLower) || matchesFuzzy(item.description, searchLower)
+			tMatch := strings.Contains(strings.ToLower(item.tags), searchLower) || matchesFuzzy(item.tags, searchLower)
+			if !vMatch && !cMatch && !dMatch && !tMatch {
+				continue
+			}
 		}
 
 		if getTagFlag != "" {
@@ -269,7 +513,6 @@ func handleSavedListLookup(database *sql.DB, search string) {
 				continue
 			}
 		}
-
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {
@@ -297,21 +540,39 @@ func handleSavedListLookup(database *sql.DB, search string) {
 		items = items[len(items)-limit:]
 	}
 
-	fmt.Printf("\n%s\n", color.New(color.Bold, color.Underline).Sprint("Saved Commands"))
-	fmt.Printf("%-5s  %-15s  %-40s  %-20s\n", "ID", "Variable", "Command", "Tags")
-	fmt.Println(strings.Repeat("-", 85))
+	headerTitle := "Saved Commands"
+	fmt.Printf("\n%s\n", color.New(color.Bold, color.Underline).Sprint(headerTitle))
+	fmt.Printf("%-5s  %-15s  %-35s  %-15s  %-20s\n", "ID", "Variable", "Command", "Tags", "Description")
+	fmt.Println(strings.Repeat("-", 95))
 
-	displayMap := make(map[string]string)
+	type displayItem struct {
+		cmdStr      string
+		description string
+	}
+
+	displayMap := make(map[string]displayItem)
 	for i, item := range items {
 		displayId := i + 1
 		idStr := strconv.Itoa(displayId)
-		displayMap[idStr] = item.cmdStr
+		displayMap[idStr] = displayItem{
+			cmdStr:      item.cmdStr,
+			description: item.description,
+		}
 
 		cmdPreview := item.cmdStr
-		if len(cmdPreview) > 40 {
-			cmdPreview = cmdPreview[:37] + "..."
+		if strings.Contains(cmdPreview, "\n") {
+			cmdPreview = strings.Split(cmdPreview, "\n")[0] + "..."
 		}
-		fmt.Printf("%-5d  %-15s  %-40s  %-20s\n", displayId, item.varName, cmdPreview, item.tags)
+		if len(cmdPreview) > 35 {
+			cmdPreview = cmdPreview[:32] + "..."
+		}
+
+		descPreview := item.description
+		if len(descPreview) > 20 {
+			descPreview = descPreview[:17] + "..."
+		}
+
+		fmt.Printf("%-5d  %-15s  %-35s  %-15s  %-20s\n", displayId, item.varName, cmdPreview, item.tags, descPreview)
 	}
 	fmt.Println()
 
@@ -319,8 +580,12 @@ func handleSavedListLookup(database *sql.DB, search string) {
 		return
 	}
 
+	promptLabel := "Copy (ID): "
+	if execFlag {
+		promptLabel = "Execute (ID): "
+	}
+	fmt.Print(promptLabel)
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Copy (ID): ")
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(choice)
 
@@ -328,13 +593,8 @@ func handleSavedListLookup(database *sql.DB, search string) {
 		return
 	}
 
-	if cmdStr, ok := displayMap[choice]; ok {
-		if err := clipboard.WriteAll(cmdStr); err != nil {
-			fmt.Printf(color.YellowString("Warning: Failed to copy to clipboard: %v\n"), err)
-			fmt.Println(cmdStr)
-		} else {
-			fmt.Printf(color.GreenString("Copied command #%s -> ")+"%s\n", choice, cmdStr)
-		}
+	if item, ok := displayMap[choice]; ok {
+		outputOrCopyCommand(item.cmdStr, item.description, choice)
 	} else {
 		fmt.Println(color.RedString("Invalid ID selected."))
 	}
@@ -458,12 +718,7 @@ func handleHistoryLookup(database *sql.DB, search string) {
 	}
 
 	if cmdStr, ok := displayMap[choice]; ok {
-		if err := clipboard.WriteAll(cmdStr); err != nil {
-			fmt.Printf(color.YellowString("Warning: Failed to copy to clipboard: %v\n"), err)
-			fmt.Println(cmdStr)
-		} else {
-			fmt.Printf(color.GreenString("Copied command #%s -> ")+"%s\n", choice, cmdStr)
-		}
+		outputOrCopyCommand(cmdStr, "", choice)
 	} else {
 		fmt.Println(color.RedString("Invalid ID selected."))
 	}
@@ -482,7 +737,8 @@ func init() {
 	getCmd.Flags().Bool("help", false, "help for get")
 
 	getCmd.Flags().StringVarP(&getTagFlag, "tag", "t", "", "Filter saved commands by tag")
-	getCmd.Flags().BoolVarP(&showFlag, "show", "s", false, "Show command value without copying")
+	getCmd.Flags().BoolVarP(&execFlag, "exec", "x", false, "Execute retrieved command directly in terminal")
+	getCmd.Flags().BoolVar(&showFlag, "show", false, "Show command value without copying")
 	getCmd.Flags().BoolVarP(&listFlag, "list", "l", false, "List commands without prompt")
 	getCmd.Flags().BoolVarP(&copyFlag, "copy", "c", false, "Read database from copy bank")
 	getCmd.Flags().BoolVarP(&histFlag, "hist", "h", false, "Lookup shell history logs")

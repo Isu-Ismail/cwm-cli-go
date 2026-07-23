@@ -1,14 +1,38 @@
 package db
 
 import (
+	"crypto/md5"
 	"database/sql"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
+
+// AppVersion is the global metadata version string for CWM database and CLI.
+const AppVersion = "v1.0.0"
+
+// getBuildSignature computes a unique hash for schema & build verification
+func getBuildSignature() string {
+	raw := AppVersion + ":cwm_schema_v5_safe_vacuum_repair_2026_07_23"
+	return fmt.Sprintf("%x", md5.Sum([]byte(raw)))
+}
+
+// GetScriptsDir returns the global scripts directory path ~/.cwm/scripts
+func GetScriptsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	scriptsFolder := filepath.Join(home, ".cwm", "scripts")
+	if err := os.MkdirAll(scriptsFolder, 0755); err != nil {
+		return "", err
+	}
+	return scriptsFolder, nil
+}
 
 // GetDBPath returns the global path ~/.cwm/cwm.db
 func GetDBPath() (string, error) {
@@ -23,8 +47,76 @@ func GetDBPath() (string, error) {
 	return filepath.Join(dbFolder, "cwm.db"), nil
 }
 
-// InitDB initializes connection and runs schema migrations
+// checkAndRepairDB detects malformed SQLite b-tree pages and runs VACUUM/REINDEX to repair
+func checkAndRepairDB(db *sql.DB) {
+	var integrity string
+	err := db.QueryRow("PRAGMA integrity_check;").Scan(&integrity)
+	if err != nil || integrity != "ok" {
+		_, _ = db.Exec("VACUUM;")
+		_, _ = db.Exec("REINDEX;")
+	}
+}
+
+// migrateLegacyTables checks and upgrades tables that used AUTOINCREMENT so sqlite_sequence can be safely removed
+func migrateLegacyTables(db *sql.DB) {
+	var createSql string
+	_ = db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='trashed_commands'").Scan(&createSql)
+
+	if strings.Contains(strings.ToUpper(createSql), "AUTOINCREMENT") {
+		// Re-create table without AUTOINCREMENT keyword
+		_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS trashed_commands_new (
+			id INTEGER PRIMARY KEY,
+			variable TEXT NOT NULL,
+			command TEXT NOT NULL,
+			tags TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`)
+		_, _ = db.Exec(`INSERT INTO trashed_commands_new (id, variable, command, tags, description, deleted_at)
+			SELECT id, variable, command, tags, description, deleted_at FROM trashed_commands;`)
+		_, _ = db.Exec(`DROP TABLE trashed_commands;`)
+		_, _ = db.Exec(`ALTER TABLE trashed_commands_new RENAME TO trashed_commands;`)
+	}
+}
+
+// cleanupUnwantedTables safely drops sqlite_sequence and any non-schema tables
+func cleanupUnwantedTables(db *sql.DB) {
+	allowed := map[string]bool{
+		"saved_commands":   true,
+		"config":           true,
+		"history_logs":     true,
+		"trashed_commands": true,
+		"db_metadata":      true,
+	}
+
+	// 1. Safe standard drop of sqlite_sequence table
+	_, _ = db.Exec("DROP TABLE IF EXISTS sqlite_sequence;")
+
+	// 2. Query all tables in database and drop non-schema tables
+	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type='table'")
+	if err == nil {
+		var toDrop []string
+		for rows.Next() {
+			var name string
+			if errScan := rows.Scan(&name); errScan == nil {
+				if !allowed[name] && !strings.HasPrefix(name, "sqlite_") {
+					toDrop = append(toDrop, name)
+				}
+			}
+		}
+		_ = rows.Err()
+		rows.Close()
+
+		for _, tbl := range toDrop {
+			_, _ = db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s;", tbl))
+		}
+	}
+}
+
+// InitDB initializes connection, repairs integrity, cleans unwanted tables, checks build signature, and runs schema migrations
 func InitDB() (*sql.DB, error) {
+	_, _ = GetScriptsDir()
+
 	path, err := GetDBPath()
 	if err != nil {
 		return nil, err
@@ -35,11 +127,44 @@ func InitDB() (*sql.DB, error) {
 		return nil, err
 	}
 
+	// 1. Check database integrity and rebuild/vacuum if malformed
+	checkAndRepairDB(db)
+
+	// 2. Upgrade legacy AUTOINCREMENT tables so sqlite_sequence can be safely dropped
+	migrateLegacyTables(db)
+
+	// 3. Forcibly drop sqlite_sequence and non-schema tables on every DB connection
+	cleanupUnwantedTables(db)
+
+	// 4. Ensure db_metadata table exists
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS db_metadata (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	buildSig := getBuildSignature()
+
+	// 5. Check if stored build_signature matches current build
+	var currentBuildSig string
+	_ = db.QueryRow("SELECT value FROM db_metadata WHERE key = 'build_signature'").Scan(&currentBuildSig)
+
+	if currentBuildSig == buildSig {
+		// Schema & build signature matches, skip running re-migrations
+		return db, nil
+	}
+
+	// 6. Run schema creation without AUTOINCREMENT keyword
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS saved_commands (
 			variable TEXT PRIMARY KEY,
 			command TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
@@ -52,6 +177,14 @@ func InitDB() (*sql.DB, error) {
 			context_dir TEXT NOT NULL,
 			logged_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS trashed_commands (
+			id INTEGER PRIMARY KEY,
+			variable TEXT NOT NULL,
+			command TEXT NOT NULL,
+			tags TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_history_context ON history_logs (context_dir, logged_at);`,
 	}
 
@@ -62,7 +195,51 @@ func InitDB() (*sql.DB, error) {
 		}
 	}
 
+	// Re-run cleanup to ensure no sequence table was produced
+	cleanupUnwantedTables(db)
+
+	// Safe column migration for pre-existing older databases
+	_, _ = db.Exec("ALTER TABLE saved_commands ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+
+	// 7. Update build_signature and db_version in db_metadata
+	_, _ = db.Exec(`INSERT INTO db_metadata (key, value, updated_at) VALUES ('build_signature', ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, buildSig)
+
+	_, _ = db.Exec(`INSERT INTO db_metadata (key, value, updated_at) VALUES ('db_version', ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, AppVersion)
+
 	return db, nil
+}
+
+// TrashSavedCommands archives saved commands into trashed_commands table and caps total at 100 records
+func TrashSavedCommands(db *sql.DB, variables []string) error {
+	if len(variables) == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT INTO trashed_commands (variable, command, tags, description) SELECT variable, command, tags, description FROM saved_commands WHERE variable = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, v := range variables {
+		if _, errExec := stmt.Exec(v); errExec != nil {
+			return errExec
+		}
+	}
+
+	// Keep max 100 items in trashed_commands
+	_, _ = tx.Exec(`DELETE FROM trashed_commands WHERE id NOT IN (
+		SELECT id FROM trashed_commands ORDER BY id DESC LIMIT 100
+	)`)
+
+	return tx.Commit()
 }
 
 // GetDBConn returns the active database connection (optionally targeting copy bank)
@@ -181,13 +358,26 @@ func SyncToCopyBank(dbConn *sql.DB) error {
 		_, _ = dbConn.Exec("DETACH DATABASE copy_bank")
 	}()
 
+	// Drop sqlite_sequence on copy bank cleanly
+	_, _ = dbConn.Exec("DROP TABLE IF EXISTS copy_bank.sqlite_sequence;")
+
+	// Ensure copy bank has db_metadata table
+	_, _ = dbConn.Exec(`
+		CREATE TABLE IF NOT EXISTS copy_bank.db_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+	`)
+
 	// 1. Two-way merge of saved_commands based on updated_at timestamp
 	_, err = dbConn.Exec(`
-		INSERT INTO copy_bank.saved_commands (variable, command, tags, created_at, updated_at)
-		SELECT variable, command, tags, created_at, updated_at FROM main.saved_commands
+		INSERT INTO copy_bank.saved_commands (variable, command, tags, description, created_at, updated_at)
+		SELECT variable, command, tags, description, created_at, updated_at FROM main.saved_commands
 		ON CONFLICT(variable) DO UPDATE SET
 			command = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.command ELSE saved_commands.command END,
 			tags = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.tags ELSE saved_commands.tags END,
+			description = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.description ELSE saved_commands.description END,
 			updated_at = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.updated_at ELSE saved_commands.updated_at END
 	`)
 	if err != nil {
@@ -195,11 +385,12 @@ func SyncToCopyBank(dbConn *sql.DB) error {
 	}
 
 	_, err = dbConn.Exec(`
-		INSERT INTO main.saved_commands (variable, command, tags, created_at, updated_at)
-		SELECT variable, command, tags, created_at, updated_at FROM copy_bank.saved_commands
+		INSERT INTO main.saved_commands (variable, command, tags, description, created_at, updated_at)
+		SELECT variable, command, tags, description, created_at, updated_at FROM copy_bank.saved_commands
 		ON CONFLICT(variable) DO UPDATE SET
 			command = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.command ELSE saved_commands.command END,
 			tags = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.tags ELSE saved_commands.tags END,
+			description = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.description ELSE saved_commands.description END,
 			updated_at = CASE WHEN excluded.updated_at > saved_commands.updated_at THEN excluded.updated_at ELSE saved_commands.updated_at END
 	`)
 	if err != nil {
@@ -231,5 +422,16 @@ func SyncToCopyBank(dbConn *sql.DB) error {
 			  AND main.history_logs.logged_at = copy_bank.history_logs.logged_at
 		)
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 3. Merge db_metadata
+	_, _ = dbConn.Exec(`
+		INSERT INTO copy_bank.db_metadata (key, value, updated_at)
+		SELECT key, value, updated_at FROM main.db_metadata
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`)
+
+	return nil
 }

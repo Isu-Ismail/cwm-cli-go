@@ -15,12 +15,37 @@ var (
 	clearConfigFlag       bool
 	copyBankFlag          string
 	changeHistoryFileFlag string
+	editorFlag            string
 )
 
 var configCmd = &cobra.Command{
-	Use:   "config",
+	Use:   "config [key] [value]",
 	Short: "Manage configuration settings",
-	Long:  `Configure copy bank path, change shell history file location, or clear all configurations.`,
+	Long: `Configure CWM settings including script text editor, copy bank path, custom shell history file, or clear configurations.
+
+Examples & Common Settings:
+
+  1. Preferred Script Editor (--editor / editor):
+     Set the text editor launched for multiline script creation (cwm save -s).
+
+     Windows Examples:
+       cwm config --editor notepad
+       cwm config --editor "code --wait"
+       cwm config --editor "notepad++"
+
+     Linux / macOS (Bash / Zsh) Examples:
+       cwm config --editor nano
+       cwm config --editor vim
+       cwm config --editor "code --wait"
+
+     Reset to default:
+       cwm config --editor clear
+
+  2. Shared Copy Bank Path (-c / --copy-bank):
+       cwm config -c "D:/shared/cwm_bank.db"
+
+  3. Custom History File (--change-history-file):
+       cwm config --change-history-file "C:/Users/ismail/.bash_history"`,
 	Run: func(cmd *cobra.Command, args []string) {
 		database, err := db.InitDB()
 		if err != nil {
@@ -28,6 +53,43 @@ var configCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		defer database.Close()
+
+		// Positional argument config key setter (e.g. cwm config editor nano)
+		if len(args) > 0 {
+			key := strings.ToLower(strings.TrimSpace(args[0]))
+			if key == "editor" {
+				if len(args) > 1 {
+					newEditor := strings.TrimSpace(strings.Join(args[1:], " "))
+					if newEditor == "" || newEditor == "clear" || newEditor == "default" {
+						_ = db.SetConfigValue(database, "editor", "")
+						fmt.Println(color.GreenString("Preferred editor cleared (using OS default)."))
+					} else {
+						_ = db.SetConfigValue(database, "editor", newEditor)
+						fmt.Printf(color.GreenString("Set preferred editor: ")+"%s\n", newEditor)
+					}
+					return
+				} else {
+					currentEditor, _ := db.GetConfigValue(database, "editor")
+					if currentEditor == "" {
+						currentEditor = "Not Configured (OS default)"
+					}
+					fmt.Printf("Preferred Editor: %s\n", currentEditor)
+					return
+				}
+			}
+		}
+
+		if cmd.Flags().Changed("editor") {
+			val := strings.TrimSpace(editorFlag)
+			if val == "" || strings.ToLower(val) == "clear" || strings.ToLower(val) == "default" {
+				_ = db.SetConfigValue(database, "editor", "")
+				fmt.Println(color.GreenString("Preferred editor cleared."))
+			} else {
+				_ = db.SetConfigValue(database, "editor", val)
+				fmt.Printf(color.GreenString("Set preferred editor: ")+"%s\n", val)
+			}
+			return
+		}
 
 		// 1. Set copy bank path
 		if cmd.Flags().Changed("copy-bank") {
@@ -114,6 +176,7 @@ var configCmd = &cobra.Command{
 		dbPath, _ := db.GetDBPath()
 		copyPath, _ := db.GetConfigValue(database, "copy_bank_path")
 		histFile, _ := db.GetConfigValue(database, "history_file")
+		editorSetting, _ := db.GetConfigValue(database, "editor")
 		theme, _ := db.GetConfigValue(database, "code_theme")
 
 		if theme == "" {
@@ -125,21 +188,26 @@ var configCmd = &cobra.Command{
 		if histFile == "" {
 			histFile = "Auto-Detect"
 		}
+		if editorSetting == "" {
+			editorSetting = "Auto-Detect (OS default)"
+		}
 
 		fmt.Println()
 		fmt.Println(color.New(color.Bold, color.FgBlue).Sprint("Configuration Source"))
 		fmt.Printf("  Path: %s\n\n", dbPath)
 
 		fmt.Println(color.New(color.Bold, color.FgGreen).Sprint("General Settings"))
-		fmt.Printf("  History File:   %s\n", histFile)
-		fmt.Printf("  Code Theme:     %s\n", theme)
-		fmt.Printf("  Copy Bank Path: %s\n\n", copyPath)
+		fmt.Printf("  History File:     %s\n", histFile)
+		fmt.Printf("  Preferred Editor: %s\n", editorSetting)
+		fmt.Printf("  Code Theme:       %s\n", theme)
+		fmt.Printf("  Copy Bank Path:   %s\n\n", copyPath)
 	},
 }
 
 func init() {
 	configCmd.Flags().BoolVar(&clearConfigFlag, "clear", false, "Clear all configuration values")
 	configCmd.Flags().StringVarP(&copyBankFlag, "copy-bank", "c", "", "Set the copy bank path")
+	configCmd.Flags().StringVar(&editorFlag, "editor", "", "Set preferred text editor for script editing (e.g. nano, vim, notepad, 'code --wait')")
 	configCmd.Flags().StringVar(&changeHistoryFileFlag, "change-history-file", "", "Set custom history file path")
 	configCmd.Flags().StringVar(&changeHistoryFileFlag, "change-history-dir", "", "Set custom history file path (alias)")
 	rootCmd.AddCommand(configCmd)
