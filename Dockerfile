@@ -24,4 +24,4 @@ RUN curl -sSL https://github.com/goreleaser/goreleaser/releases/download/v1.26.2
 WORKDIR /workdir
 
 # Default build command
-CMD ["goreleaser", "release", "--clean", "--skip=publish"]
+CMD ["goreleaser", "release", "--clean", "--skip=publish", "--skip=validate"]
