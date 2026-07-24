@@ -83,8 +83,9 @@ const (
 )
 
 var watchStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Install the shell hook for command watch",
+	Use:                "start",
+	Short:              "Install the shell hook for command watch",
+	DisableFlagParsing: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		shellType := detectShell()
 		if shellType == "" || (shellType != "powershell" && shellType != "pwsh" && shellType != "zsh" && shellType != "bash") {
@@ -187,28 +188,45 @@ export PROMPT_COMMAND="__cwm_log_cmd; $PROMPT_COMMAND"
 			os.Exit(1)
 		}
 
-		// Process -ex / --exclude / -e flags
-		for i := 0; i < len(args); i++ {
-			if args[i] == "-ex" || args[i] == "--exclude" || args[i] == "-e" {
-				if i+1 < len(args) {
-					watchExcludeFlag = args[i+1]
+		// Process os.Args directly for -ex / --ex / --exclude / -e flags
+		var rawExTokens []string
+		for i := 0; i < len(os.Args); i++ {
+			arg := os.Args[i]
+			if arg == "-ex" || arg == "--ex" || arg == "-e" || arg == "--exclude" {
+				for j := i + 1; j < len(os.Args); j++ {
+					if strings.HasPrefix(os.Args[j], "-") {
+						break
+					}
+					rawExTokens = append(rawExTokens, os.Args[j])
 				}
-			} else if strings.HasPrefix(args[i], "-ex=") || strings.HasPrefix(args[i], "--exclude=") || strings.HasPrefix(args[i], "-e=") {
-				parts := strings.SplitN(args[i], "=", 2)
-				watchExcludeFlag = parts[1]
+				break
+			} else if strings.HasPrefix(arg, "-ex=") || strings.HasPrefix(arg, "--ex=") || strings.HasPrefix(arg, "-e=") || strings.HasPrefix(arg, "--exclude=") {
+				parts := strings.SplitN(arg, "=", 2)
+				rawExTokens = append(rawExTokens, parts[1])
+				for j := i + 1; j < len(os.Args); j++ {
+					if strings.HasPrefix(os.Args[j], "-") {
+						break
+					}
+					rawExTokens = append(rawExTokens, os.Args[j])
+				}
+				break
 			}
 		}
 
-		if watchExcludeFlag != "" {
-			parts := strings.Split(watchExcludeFlag, ",")
+		var cleanExclude string
+		if len(rawExTokens) > 0 {
+			joined := strings.Join(rawExTokens, ",")
+			parts := strings.Split(joined, ",")
 			var cleanParts []string
+			seen := make(map[string]bool)
 			for _, p := range parts {
 				p = strings.TrimSpace(p)
-				if p != "" {
+				if p != "" && !seen[p] {
+					seen[p] = true
 					cleanParts = append(cleanParts, p)
 				}
 			}
-			cleanExclude := strings.Join(cleanParts, ",")
+			cleanExclude = strings.Join(cleanParts, ",")
 			if database, errDb := db.InitDB(); errDb == nil {
 				_ = db.SetConfigValue(database, "watch_exclude", cleanExclude)
 				database.Close()
@@ -227,8 +245,8 @@ export PROMPT_COMMAND="__cwm_log_cmd; $PROMPT_COMMAND"
 
 		fmt.Println(color.GreenString("Watch session started successfully!"))
 		fmt.Println("  Profile updated:   " + profilePath)
-		if watchExcludeFlag != "" {
-			fmt.Println("  Excluded Commands: " + color.CyanString(watchExcludeFlag))
+		if cleanExclude != "" {
+			fmt.Println("  Excluded Commands: " + color.CyanString(cleanExclude))
 		}
 		if errClip := clipboard.WriteAll(reloadCmd); errClip == nil {
 			fmt.Printf(color.GreenString("  Copied reload command '%s' to clipboard!\n"), reloadCmd)
@@ -405,7 +423,8 @@ func getProfilePath(shellType string) (string, error) {
 }
 
 func init() {
-	watchStartCmd.Flags().StringVarP(&watchExcludeFlag, "exclude", "e", "", "Exclude commands from watch logging (e.g. -ex cwm,python,clear)")
+	watchStartCmd.Flags().StringVar(&watchExcludeFlag, "exclude", "", "Exclude commands from watch logging (e.g. -ex cwm,python,clear)")
+	watchStartCmd.Flags().StringVar(&watchExcludeFlag, "ex", "", "Exclude commands from watch logging (e.g. -ex cwm,python,clear)")
 
 	watchCmd.AddCommand(watchLogCmd)
 	watchCmd.AddCommand(watchStartCmd)
