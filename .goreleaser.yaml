@@ -1,6 +1,6 @@
 version: 1
 
-project_name: cwm
+project_name: cwm-cli
 
 before:
   hooks:
@@ -27,8 +27,8 @@ archives:
         format: zip
 
 nfpms:
-  - id: cwm
-    package_name: cwm
+  - id: cwm-cli
+    package_name: cwm-cli
     file_name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - deb
