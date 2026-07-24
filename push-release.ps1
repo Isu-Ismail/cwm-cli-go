@@ -1,6 +1,6 @@
 # Script: push-release
 # Description: Automated CWM release tagger, cross-platform builder, and git deployer
-
+#
 param (
     [string]$Version = "%Version%"
 )
