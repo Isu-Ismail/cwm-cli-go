@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	clearConfigFlag       bool
+	configClearFlag       bool
 	copyBankFlag          string
 	changeHistoryFileFlag string
 	editorFlag            string
@@ -163,7 +163,7 @@ Examples & Common Settings:
 		}
 
 		// 3. Clear all configurations
-		if clearConfigFlag {
+		if configClearFlag {
 			if err := db.ClearConfig(database); err != nil {
 				fmt.Printf(color.RedString("Error clearing config: %v\n"), err)
 				os.Exit(1)
@@ -205,7 +205,7 @@ Examples & Common Settings:
 }
 
 func init() {
-	configCmd.Flags().BoolVar(&clearConfigFlag, "clear", false, "Clear all configuration values")
+	configCmd.Flags().BoolVar(&configClearFlag, "clear", false, "Clear all configuration values")
 	configCmd.Flags().StringVarP(&copyBankFlag, "copy-bank", "c", "", "Set the copy bank path")
 	configCmd.Flags().StringVar(&editorFlag, "editor", "", "Set preferred text editor for script editing (e.g. nano, vim, notepad, 'code --wait')")
 	configCmd.Flags().StringVar(&changeHistoryFileFlag, "change-history-file", "", "Set custom history file path")

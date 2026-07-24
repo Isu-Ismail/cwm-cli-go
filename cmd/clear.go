@@ -18,11 +18,16 @@ var (
 	clearActiveFlag  string
 	clearSavedFlag   bool
 	clearHistFlag    bool
+	clearConfigFlag  bool
+	clearTrashFlag   bool
 	clearFuzzyFlag   bool
 	clearTagFlag     string
 	clearRestoreFlag string
 	clearListFlag    bool
 	clearYesFlag     bool
+	tidyMaxLines     int
+	tidyMaxChars     int
+	tidyMaxWords     int
 )
 
 type SavedCommandItem struct {
@@ -57,7 +62,39 @@ var clearCmd = &cobra.Command{
 		// 1. RESTORE / UNDO / LIST TRASH MODE (-r, -n)
 		// ----------------------------------------------------
 		if clearRestoreFlag != "" || clearListFlag {
-			handleRestoreOrListTrash(database, clearRestoreFlag, clearListFlag)
+			targetRestore := clearRestoreFlag
+			if targetRestore == "__LIST__" && len(args) > 0 {
+				targetRestore = args[0]
+			}
+			handleRestoreOrListTrash(database, targetRestore, clearListFlag)
+			return
+		}
+
+		// ----------------------------------------------------
+		// CLEAR TRASH BUFFER MODE (--trash)
+		// ----------------------------------------------------
+		if clearTrashFlag || (len(args) > 0 && strings.ToLower(args[0]) == "trash") {
+			var count int
+			_ = database.QueryRow("SELECT COUNT(*) FROM trashed_commands").Scan(&count)
+			if count == 0 {
+				fmt.Println(color.YellowString("Trash buffer is already empty."))
+				return
+			}
+
+			if !clearYesFlag {
+				if !askConfirmation(fmt.Sprintf("Are you sure you want to permanently empty ALL %d item(s) in the trash buffer?", count)) {
+					fmt.Println("Cancelled.")
+					return
+				}
+			}
+
+			_, err := database.Exec("DELETE FROM trashed_commands")
+			if err != nil {
+				fmt.Printf(color.RedString("Error clearing trash buffer: %v\n"), err)
+				os.Exit(1)
+			}
+			_ = db.SyncToCopyBank(database)
+			fmt.Printf(color.GreenString("Successfully emptied trash buffer (%d item(s) permanently deleted).\n"), count)
 			return
 		}
 
@@ -109,6 +146,7 @@ var clearCmd = &cobra.Command{
 			if errTrash := db.TrashSavedCommands(database, varsToDelete); errTrash != nil {
 				fmt.Printf(color.YellowString("Warning: Could not archive to trash: %v\n"), errTrash)
 			}
+			deleteScriptFilesForVariables(database, varsToDelete)
 			for _, v := range varsToDelete {
 				_, _ = database.Exec("DELETE FROM saved_commands WHERE variable = ?", v)
 			}
@@ -179,6 +217,7 @@ var clearCmd = &cobra.Command{
 			if errTrash := db.TrashSavedCommands(database, vars); errTrash != nil {
 				fmt.Printf(color.YellowString("Warning: Could not archive to trash: %v\n"), errTrash)
 			}
+			deleteScriptFilesForVariables(database, vars)
 			_, err = database.Exec("DELETE FROM saved_commands")
 			if err != nil {
 				fmt.Printf(color.RedString("Error clearing saved commands: %v\n"), err)
@@ -207,6 +246,51 @@ var clearCmd = &cobra.Command{
 			}
 			_ = db.SyncToCopyBank(database)
 			fmt.Println(color.GreenString("All database history logs cleared successfully."))
+			return
+		}
+
+		// ----------------------------------------------------
+		// 6. CLEAR ALL SYSTEM CONFIGURATIONS (-c, --config)
+		// ----------------------------------------------------
+		if clearConfigFlag {
+			rows, err := database.Query("SELECT key, value FROM config")
+			var keys []string
+			if err == nil {
+				for rows.Next() {
+					var k, v string
+					if errScan := rows.Scan(&k, &v); errScan == nil {
+						keys = append(keys, fmt.Sprintf("%s = %s", k, v))
+					}
+				}
+				_ = rows.Err()
+				rows.Close()
+			}
+
+			if len(keys) == 0 {
+				fmt.Println(color.YellowString("No system configurations found in database."))
+				return
+			}
+
+			fmt.Println(color.CyanString("Current Saved System Configurations:"))
+			for _, k := range keys {
+				fmt.Printf("  • %s\n", k)
+			}
+			fmt.Println()
+
+			if !clearYesFlag {
+				if !askConfirmation("Are you sure you want to clear all system configurations?") {
+					fmt.Println("Cancelled.")
+					return
+				}
+			}
+
+			_, err = database.Exec("DELETE FROM config")
+			if err != nil {
+				fmt.Printf(color.RedString("Error clearing configurations: %v\n"), err)
+				os.Exit(1)
+			}
+			_ = db.SyncToCopyBank(database)
+			fmt.Println(color.GreenString("All system configurations cleared successfully (default auto-detection settings restored)."))
 			return
 		}
 
@@ -331,6 +415,8 @@ var clearCmd = &cobra.Command{
 			fmt.Printf(color.YellowString("Warning: Could not archive to trash: %v\n"), errTrash)
 		}
 
+		deleteScriptFilesForVariables(database, varsToDelete)
+
 		// Execute deletion
 		for _, v := range varsToDelete {
 			_, _ = database.Exec("DELETE FROM saved_commands WHERE variable = ?", v)
@@ -339,6 +425,24 @@ var clearCmd = &cobra.Command{
 
 		fmt.Printf(color.GreenString("Successfully deleted %d command(s) and moved to trash: %s\n"), len(varsToDelete), strings.Join(varsToDelete, ", "))
 	},
+}
+
+func deleteScriptFilesForVariables(database *sql.DB, variables []string) {
+	for _, v := range variables {
+		var cmdStr, cmdType string
+		err := database.QueryRow("SELECT command, COALESCE(type, 'command') FROM saved_commands WHERE variable = ?", v).Scan(&cmdStr, &cmdType)
+		if err == nil {
+			if cmdType == "script" || strings.Contains(cmdStr, "scripts/") || strings.Contains(cmdStr, "scripts\\") || strings.HasSuffix(cmdStr, ".ps1") || strings.HasSuffix(cmdStr, ".sh") {
+				scriptPath, _ := validateScriptFileExists(cmdStr)
+				if scriptPath != "" {
+					if _, statErr := os.Stat(scriptPath); statErr == nil {
+						_ = os.Remove(scriptPath)
+						fmt.Printf(color.YellowString("Notice: Deleted associated script file for '%s': %s\n"), v, scriptPath)
+					}
+				}
+			}
+		}
+	}
 }
 
 // handleRestoreOrListTrash manages restoring trashed commands or listing trash contents
@@ -568,16 +672,129 @@ func parseIndices(input string, max int) []int {
 	return indices
 }
 
+var tidyCmd = &cobra.Command{
+	Use:   "tidy",
+	Short: "Tidy up shell history file by removing duplicates and bloated commands",
+	Long:  `Removes duplicate command lines and filters out commands exceeding max character length (-c) or max line count (-n).`,
+	Run: func(cmd *cobra.Command, args []string) {
+		database, err := db.InitDB()
+		if err != nil {
+			fmt.Printf(color.RedString("Database error: %v\n"), err)
+			os.Exit(1)
+		}
+		defer database.Close()
+
+		histPath := getHistoryFilePath(database)
+		if histPath == "" {
+			fmt.Println(color.YellowString("No active shell history file detected to tidy."))
+			return
+		}
+
+		fileLines, err := readLines(histPath)
+		if err != nil {
+			fmt.Printf(color.RedString("Error reading history file: %v\n"), err)
+			return
+		}
+
+		if len(fileLines) == 0 {
+			fmt.Println(color.YellowString("History file is already empty."))
+			return
+		}
+
+		var tidied []string
+		seen := make(map[string]bool)
+		dupCount := 0
+		charBloatCount := 0
+		wordBloatCount := 0
+
+		for _, line := range fileLines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+
+			// 1. Check duplicates
+			if seen[trimmed] {
+				dupCount++
+				continue
+			}
+
+			// 2. Check max characters limit (-c)
+			if tidyMaxChars > 0 && len(trimmed) > tidyMaxChars {
+				charBloatCount++
+				continue
+			}
+
+			// 3. Check max words limit (-w)
+			if tidyMaxWords > 0 && len(strings.Fields(trimmed)) > tidyMaxWords {
+				wordBloatCount++
+				continue
+			}
+
+			seen[trimmed] = true
+			tidied = append(tidied, line)
+		}
+
+		if !clearYesFlag {
+			fmt.Printf("\n%s\n", color.New(color.Bold, color.Underline).Sprint("Shell History Analysis"))
+			fmt.Printf("  Target File:         %s\n", color.CyanString(histPath))
+			fmt.Printf("  • Total Raw Lines:   %d\n", len(fileLines))
+			fmt.Printf("  • Duplicate Lines:   %d\n", dupCount)
+			if tidyMaxChars > 0 {
+				fmt.Printf("  • Oversized (>%d ch): %d\n", tidyMaxChars, charBloatCount)
+			} else {
+				fmt.Printf("  • Oversized Chars:   Disabled (-c 0)\n")
+			}
+			if tidyMaxWords > 0 {
+				fmt.Printf("  • Oversized (>%d w):  %d\n", tidyMaxWords, wordBloatCount)
+			} else {
+				fmt.Printf("  • Oversized Words:   Disabled (-w 0)\n")
+			}
+			fmt.Printf("  • Optimized Result:  %d -> %d lines\n\n", len(fileLines), len(tidied))
+
+			if !askConfirmation("Apply history tidying now?") {
+				fmt.Println("Cancelled.")
+				return
+			}
+		}
+
+		outputContent := strings.Join(tidied, "\n") + "\n"
+		if errWrite := os.WriteFile(histPath, []byte(outputContent), 0644); errWrite != nil {
+			fmt.Printf(color.RedString("Error updating history file: %v\n"), errWrite)
+			return
+		}
+
+		fmt.Printf("%s", color.GreenString("Successfully tidied history file:\n"))
+		fmt.Printf("  Target: %s\n", histPath)
+		fmt.Printf("  • Removed duplicate entries: %d\n", dupCount)
+		if tidyMaxChars > 0 {
+			fmt.Printf("  • Removed oversized char lines (>%d chars): %d\n", tidyMaxChars, charBloatCount)
+		}
+		if tidyMaxWords > 0 {
+			fmt.Printf("  • Removed oversized word lines (>%d words): %d\n", tidyMaxWords, wordBloatCount)
+		}
+		fmt.Printf("  • Total lines: %d -> %d\n", len(fileLines), len(tidied))
+	},
+}
+
 func init() {
 	clearCmd.Flags().StringVarP(&clearActiveFlag, "active", "a", "", "Clear watch history matching path")
 	clearCmd.Flags().BoolVarP(&clearSavedFlag, "saved", "s", false, "Clear all saved commands")
 	clearCmd.Flags().BoolVarP(&clearHistFlag, "history", "d", false, "Clear all database shell history logs")
+	clearCmd.Flags().BoolVarP(&clearConfigFlag, "config", "c", false, "Clear all saved system configurations (editor, history file, code theme, etc.)")
+	clearCmd.Flags().BoolVar(&clearTrashFlag, "trash", false, "Permanently empty the trash buffer")
 	clearCmd.Flags().BoolVarP(&clearFuzzyFlag, "fuzzy", "f", false, "Fuzzy clear saved commands matching query")
 	clearCmd.Flags().StringVarP(&clearTagFlag, "tag", "t", "", "Clear saved commands matching tag exactly")
 	clearCmd.Flags().StringVarP(&clearRestoreFlag, "restore", "r", "", "Restore trashed commands (pass variable name, or run without args to list & select)")
 	clearCmd.Flags().Lookup("restore").NoOptDefVal = "__LIST__"
 	clearCmd.Flags().BoolVarP(&clearListFlag, "list", "n", false, "List trashed commands")
 	clearCmd.Flags().BoolVarP(&clearYesFlag, "yes", "y", false, "Skip confirmation prompts")
+
+	tidyCmd.Flags().IntVarP(&tidyMaxLines, "max-lines", "n", 10, "Remove multiline commands exceeding N lines")
+	tidyCmd.Flags().IntVarP(&tidyMaxChars, "max-chars", "c", 200, "Remove command lines exceeding N characters (0 to disable)")
+	tidyCmd.Flags().IntVarP(&tidyMaxWords, "max-words", "w", 50, "Remove command lines exceeding N words (0 to disable)")
+	tidyCmd.Flags().BoolVarP(&clearYesFlag, "yes", "y", false, "Skip confirmation prompt")
+	clearCmd.AddCommand(tidyCmd)
 
 	rootCmd.AddCommand(clearCmd)
 }

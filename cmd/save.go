@@ -66,16 +66,60 @@ var saveCmd = &cobra.Command{
 				descriptionVal = strings.TrimSpace(parts[1])
 			case arg == "-t" || arg == "--tags" || arg == "--tag":
 				tagsFlagPassed = true
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					currentTags = strings.ToLower(strings.TrimSpace(args[i+1]))
+				for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					val := strings.ToLower(strings.TrimSpace(args[i+1]))
 					i++
-				} else {
-					currentTags = ""
+					if val != "" {
+						tagParts := strings.Split(val, ",")
+						for _, tp := range tagParts {
+							tp = strings.TrimSpace(tp)
+							if tp != "" {
+								if currentTags == "" {
+									currentTags = tp
+								} else {
+									existingList := strings.Split(currentTags, ",")
+									alreadyExists := false
+									for _, ex := range existingList {
+										if strings.TrimSpace(ex) == tp {
+											alreadyExists = true
+											break
+										}
+									}
+									if !alreadyExists {
+										currentTags += ", " + tp
+									}
+								}
+							}
+						}
+					}
 				}
 			case strings.HasPrefix(arg, "-t=") || strings.HasPrefix(arg, "--tags=") || strings.HasPrefix(arg, "--tag="):
 				tagsFlagPassed = true
 				parts := strings.SplitN(arg, "=", 2)
-				currentTags = strings.ToLower(strings.TrimSpace(parts[1]))
+				val := strings.ToLower(strings.TrimSpace(parts[1]))
+				if val != "" {
+					tagParts := strings.Split(val, ",")
+					for _, tp := range tagParts {
+						tp = strings.TrimSpace(tp)
+						if tp != "" {
+							if currentTags == "" {
+								currentTags = tp
+							} else {
+								existingList := strings.Split(currentTags, ",")
+								alreadyExists := false
+								for _, ex := range existingList {
+									if strings.TrimSpace(ex) == tp {
+										alreadyExists = true
+										break
+									}
+								}
+								if !alreadyExists {
+									currentTags += ", " + tp
+								}
+							}
+						}
+					}
+				}
 			default:
 				cleanArgs = append(cleanArgs, arg)
 			}
@@ -368,7 +412,7 @@ var saveCmd = &cobra.Command{
 					// If script mode, allow updating existing script entry gracefully
 					if scriptFlag {
 						_, err = tx.Exec(`
-							UPDATE saved_commands SET command = ?, tags = ?, description = ?, updated_at = ? WHERE variable = ?
+							UPDATE saved_commands SET command = ?, tags = ?, description = ?, type = 'script', updated_at = ? WHERE variable = ?
 						`, c.value, c.tags, c.description, now, c.variable)
 					} else {
 						tx.Rollback()
@@ -376,10 +420,14 @@ var saveCmd = &cobra.Command{
 						os.Exit(1)
 					}
 				} else {
+					cmdType := "command"
+					if scriptFlag {
+						cmdType = "script"
+					}
 					_, err = tx.Exec(`
-						INSERT INTO saved_commands (variable, command, tags, description, created_at, updated_at)
-						VALUES (?, ?, ?, ?, ?, ?)
-					`, c.variable, c.value, c.tags, c.description, now, now)
+						INSERT INTO saved_commands (variable, command, tags, description, type, created_at, updated_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?)
+					`, c.variable, c.value, c.tags, c.description, cmdType, now, now)
 				}
 			}
 

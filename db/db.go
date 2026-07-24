@@ -13,11 +13,11 @@ import (
 )
 
 // AppVersion is the global metadata version string for CWM database and CLI.
-const AppVersion = "v1.0.0"
+const AppVersion = "v2.0.0"
 
 // getBuildSignature computes a unique hash for schema & build verification
 func getBuildSignature() string {
-	raw := AppVersion + ":cwm_schema_v5_safe_vacuum_repair_2026_07_23"
+	raw := AppVersion + ":cwm_schema_v6_type_column_migration_2026_07_24"
 	return fmt.Sprintf("%x", md5.Sum([]byte(raw)))
 }
 
@@ -165,6 +165,7 @@ func InitDB() (*sql.DB, error) {
 			command TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '',
 			description TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'command',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
@@ -183,6 +184,7 @@ func InitDB() (*sql.DB, error) {
 			command TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '',
 			description TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'command',
 			deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_history_context ON history_logs (context_dir, logged_at);`,
@@ -200,6 +202,8 @@ func InitDB() (*sql.DB, error) {
 
 	// Safe column migration for pre-existing older databases
 	_, _ = db.Exec("ALTER TABLE saved_commands ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE saved_commands ADD COLUMN type TEXT NOT NULL DEFAULT 'command'")
+	_, _ = db.Exec("ALTER TABLE trashed_commands ADD COLUMN type TEXT NOT NULL DEFAULT 'command'")
 
 	// 7. Update build_signature and db_version in db_metadata
 	_, _ = db.Exec(`INSERT INTO db_metadata (key, value, updated_at) VALUES ('build_signature', ?, CURRENT_TIMESTAMP)
@@ -222,7 +226,7 @@ func TrashSavedCommands(db *sql.DB, variables []string) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare("INSERT INTO trashed_commands (variable, command, tags, description) SELECT variable, command, tags, description FROM saved_commands WHERE variable = ?")
+	stmt, err := tx.Prepare("INSERT INTO trashed_commands (variable, command, tags, description, type) SELECT variable, command, tags, description, COALESCE(type, 'command') FROM saved_commands WHERE variable = ?")
 	if err != nil {
 		return err
 	}
