@@ -136,17 +136,26 @@ func resolvePlaceholders(cmdStr string) string {
 	return replaced
 }
 
-func validateScriptFileExists(cmdStr string) (string, bool) {
+func extractScriptPath(cmdStr string) string {
 	if strings.Contains(cmdStr, "scripts/") || strings.Contains(cmdStr, "scripts\\") || strings.Contains(cmdStr, ".sh") || strings.Contains(cmdStr, ".ps1") {
 		words := strings.Fields(cmdStr)
 		for _, w := range words {
 			cleanW := strings.Trim(w, `"'`)
 			if strings.HasSuffix(cleanW, ".sh") || strings.HasSuffix(cleanW, ".ps1") {
-				if _, err := os.Stat(cleanW); os.IsNotExist(err) {
-					return cleanW, false
-				}
+				return cleanW
 			}
 		}
+	}
+	return ""
+}
+
+func validateScriptFileExists(cmdStr string) (string, bool) {
+	scriptPath := extractScriptPath(cmdStr)
+	if scriptPath != "" {
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			return scriptPath, false
+		}
+		return scriptPath, true
 	}
 	return "", true
 }
