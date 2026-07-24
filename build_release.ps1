@@ -31,16 +31,12 @@ if ($status) {
     git commit -m "chore: prepare codebase for release $Version"
 }
 
-# 2. Create local Git tag (LOCAL ONLY - DO NOT PUSH YET)
-Write-Host "`n[2/6] Creating local Git tag $Version..." -ForegroundColor Yellow
-git tag -a "$Version" -m "Release $Version" -f
-
-# 3. Clean temporary GoReleaser dist folder (keep existing release/ archives intact)
-Write-Host "`n[3/6] Cleaning temporary dist folder..." -ForegroundColor Blue
+# 2. Clean temporary GoReleaser dist folder (keep existing release/ archives intact)
+Write-Host "`n[2/6] Cleaning temporary dist folder..." -ForegroundColor Blue
 if (Test-Path "$RootDir/dist") { Remove-Item -Recurse -Force "$RootDir/dist" }
 
-# 4. Build and run GoReleaser inside Docker
-Write-Host "`n[4/6] Building Docker build image (cwm-builder)..." -ForegroundColor Blue
+# 3. Build and run GoReleaser inside Docker
+Write-Host "`n[3/6] Building Docker build image (cwm-builder)..." -ForegroundColor Blue
 docker build -t cwm-builder "$RootDir"
 
 if ($LASTEXITCODE -ne 0) {
@@ -56,8 +52,8 @@ if ($LASTEXITCODE -ne 0) {
     Exit 1
 }
 
-# 5. Create versioned release directories under release/release-vX.Y.Z/
-Write-Host "`n[5/6] Structuring release packages into $ReleaseDirName..." -ForegroundColor Blue
+# 4. Create versioned release directories under release/release-vX.Y.Z/
+Write-Host "`n[4/6] Structuring release packages into $ReleaseDirName..." -ForegroundColor Blue
 if (Test-Path "$TargetReleaseDir") { Remove-Item -Recurse -Force "$TargetReleaseDir" }
 
 New-Item -ItemType Directory -Path "$TargetReleaseDir/win" -Force | Out-Null
@@ -71,10 +67,14 @@ Get-ChildItem -Path "$RootDir/dist" -Filter "*darwin*.tar.gz" -Recurse | Copy-It
 
 Remove-Item -Recurse -Force "$RootDir/dist"
 
-# 6. ATOMIC COMMIT & PUSH (ONLY EXECUTES IF ALL PREVIOUS STEPS SUCCEEDED)
-Write-Host "`n[6/6] All build checks passed! Pushing release to origin main..." -ForegroundColor Yellow
-git add "$TargetReleaseDir"
+# 5. ATOMIC COMMIT OF RELEASE ASSETS
+Write-Host "`n[5/6] Committing release assets to repository..." -ForegroundColor Yellow
+git add .
 git commit -m "release: $Version [publish]"
+
+# 6. TAG ATOMIC COMMIT AND PUSH TO REMOTE
+Write-Host "`n[6/6] Tagging atomic commit and pushing to origin main & $Version..." -ForegroundColor Yellow
+git tag -a "$Version" -m "Release $Version" -f
 git push origin main
 git push origin "$Version" -f
 
