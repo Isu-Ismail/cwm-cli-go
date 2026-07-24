@@ -15,12 +15,28 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Verify Matching Release Directory
+        id: check_dir
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          RELEASE_DIR="release/release-${TAG_NAME}"
+          echo "Triggered Tag: ${TAG_NAME}"
+          echo "Target Release Directory: ${RELEASE_DIR}"
+          if [ -d "${RELEASE_DIR}" ]; then
+            echo "dir_exists=true" >> $GITHUB_OUTPUT
+            echo "release_dir=${RELEASE_DIR}" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Release directory '${RELEASE_DIR}' does not exist! Skipping GitHub Release creation."
+            echo "dir_exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Publish Pre-Built Assets to Release
+        if: steps.check_dir.outputs.dir_exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/win/*
-            release/mac/*
-            release/deb/*
+            ${{ steps.check_dir.outputs.release_dir }}/win/*
+            ${{ steps.check_dir.outputs.release_dir }}/mac/*
+            ${{ steps.check_dir.outputs.release_dir }}/deb/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
