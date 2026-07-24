@@ -10,8 +10,13 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+)
+
+var (
+	watchExcludeFlag string
 )
 
 var watchCmd = &cobra.Command{
@@ -36,12 +41,29 @@ var watchLogCmd = &cobra.Command{
 		if err != nil {
 			return
 		}
-		defer database.Close()
-
 		// Get current working directory
-		cwd, err := os.Getwd()
-		if err != nil {
+		cwd, errCwd := os.Getwd()
+		if errCwd != nil {
 			cwd = "unknown"
+		}
+
+		// Check exclusions from config table
+		excludeVal, errEx := db.GetConfigValue(database, "watch_exclude")
+		if errEx == nil && excludeVal != "" {
+			parts := strings.Split(excludeVal, ",")
+			words := strings.Fields(commandVal)
+			if len(words) > 0 {
+				firstWord := strings.ToLower(words[0])
+				cmdLower := strings.ToLower(commandVal)
+				for _, p := range parts {
+					target := strings.ToLower(strings.TrimSpace(p))
+					if target != "" {
+						if firstWord == target || strings.HasPrefix(cmdLower, target+" ") || cmdLower == target {
+							return
+						}
+					}
+				}
+			}
 		}
 
 		// Insert log
@@ -165,9 +187,55 @@ export PROMPT_COMMAND="__cwm_log_cmd; $PROMPT_COMMAND"
 			os.Exit(1)
 		}
 
+		// Process -ex / --exclude / -e flags
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-ex" || args[i] == "--exclude" || args[i] == "-e" {
+				if i+1 < len(args) {
+					watchExcludeFlag = args[i+1]
+				}
+			} else if strings.HasPrefix(args[i], "-ex=") || strings.HasPrefix(args[i], "--exclude=") || strings.HasPrefix(args[i], "-e=") {
+				parts := strings.SplitN(args[i], "=", 2)
+				watchExcludeFlag = parts[1]
+			}
+		}
+
+		if watchExcludeFlag != "" {
+			parts := strings.Split(watchExcludeFlag, ",")
+			var cleanParts []string
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					cleanParts = append(cleanParts, p)
+				}
+			}
+			cleanExclude := strings.Join(cleanParts, ",")
+			if database, errDb := db.InitDB(); errDb == nil {
+				_ = db.SetConfigValue(database, "watch_exclude", cleanExclude)
+				database.Close()
+			}
+		}
+
+		var reloadCmd string
+		switch shellType {
+		case "zsh":
+			reloadCmd = "source ~/.zshrc"
+		case "bash":
+			reloadCmd = "source ~/.bashrc"
+		default:
+			reloadCmd = ". $PROFILE"
+		}
+
 		fmt.Println(color.GreenString("Watch session started successfully!"))
-		fmt.Println("  Profile updated: " + profilePath)
-		fmt.Println("  Restart your shell or reload your profile to apply.")
+		fmt.Println("  Profile updated:   " + profilePath)
+		if watchExcludeFlag != "" {
+			fmt.Println("  Excluded Commands: " + color.CyanString(watchExcludeFlag))
+		}
+		if errClip := clipboard.WriteAll(reloadCmd); errClip == nil {
+			fmt.Printf(color.GreenString("  Copied reload command '%s' to clipboard!\n"), reloadCmd)
+			fmt.Println("  Press Ctrl+V (or right-click) and Enter to activate your profile immediately.")
+		} else {
+			fmt.Printf("  Run %s to activate your profile immediately.\n", color.CyanString(reloadCmd))
+		}
 	},
 }
 
@@ -214,7 +282,23 @@ var watchStopCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		var reloadCmd string
+		switch shellType {
+		case "zsh":
+			reloadCmd = "source ~/.zshrc"
+		case "bash":
+			reloadCmd = "source ~/.bashrc"
+		default:
+			reloadCmd = ". $PROFILE"
+		}
+
 		fmt.Println(color.GreenString("CWM watch hook removed from profile successfully."))
+		if errClip := clipboard.WriteAll(reloadCmd); errClip == nil {
+			fmt.Printf(color.GreenString("  Copied reload command '%s' to clipboard!\n"), reloadCmd)
+			fmt.Println("  Press Ctrl+V (or right-click) and Enter to apply changes immediately.")
+		} else {
+			fmt.Printf("  Run %s to apply changes immediately.\n", color.CyanString(reloadCmd))
+		}
 	},
 }
 
@@ -237,8 +321,15 @@ var watchStatusCmd = &cobra.Command{
 		contentBytes, _ := os.ReadFile(profilePath)
 		if strings.Contains(string(contentBytes), hookStart) {
 			fmt.Println(color.GreenString("Watch status: ACTIVE"))
-			fmt.Printf("Shell Type:   %s\n", shellType)
-			fmt.Printf("Profile File: %s\n", profilePath)
+			fmt.Printf("Shell Type:        %s\n", shellType)
+			fmt.Printf("Profile File:      %s\n", profilePath)
+			if database, errDb := db.InitDB(); errDb == nil {
+				exVal, _ := db.GetConfigValue(database, "watch_exclude")
+				database.Close()
+				if exVal != "" {
+					fmt.Printf("Excluded Commands: %s\n", color.CyanString(exVal))
+				}
+			}
 		} else {
 			fmt.Println("Watch status: INACTIVE")
 		}
@@ -314,6 +405,8 @@ func getProfilePath(shellType string) (string, error) {
 }
 
 func init() {
+	watchStartCmd.Flags().StringVarP(&watchExcludeFlag, "exclude", "e", "", "Exclude commands from watch logging (e.g. -ex cwm,python,clear)")
+
 	watchCmd.AddCommand(watchLogCmd)
 	watchCmd.AddCommand(watchStartCmd)
 	watchCmd.AddCommand(watchStopCmd)

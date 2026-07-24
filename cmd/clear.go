@@ -25,9 +25,6 @@ var (
 	clearRestoreFlag string
 	clearListFlag    bool
 	clearYesFlag     bool
-	tidyMaxLines     int
-	tidyMaxChars     int
-	tidyMaxWords     int
 )
 
 type SavedCommandItem struct {
@@ -672,111 +669,6 @@ func parseIndices(input string, max int) []int {
 	return indices
 }
 
-var tidyCmd = &cobra.Command{
-	Use:   "tidy",
-	Short: "Tidy up shell history file by removing duplicates and bloated commands",
-	Long:  `Removes duplicate command lines and filters out commands exceeding max character length (-c) or max line count (-n).`,
-	Run: func(cmd *cobra.Command, args []string) {
-		database, err := db.InitDB()
-		if err != nil {
-			fmt.Printf(color.RedString("Database error: %v\n"), err)
-			os.Exit(1)
-		}
-		defer database.Close()
-
-		histPath := getHistoryFilePath(database)
-		if histPath == "" {
-			fmt.Println(color.YellowString("No active shell history file detected to tidy."))
-			return
-		}
-
-		fileLines, err := readLines(histPath)
-		if err != nil {
-			fmt.Printf(color.RedString("Error reading history file: %v\n"), err)
-			return
-		}
-
-		if len(fileLines) == 0 {
-			fmt.Println(color.YellowString("History file is already empty."))
-			return
-		}
-
-		var tidied []string
-		seen := make(map[string]bool)
-		dupCount := 0
-		charBloatCount := 0
-		wordBloatCount := 0
-
-		for _, line := range fileLines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-
-			// 1. Check duplicates
-			if seen[trimmed] {
-				dupCount++
-				continue
-			}
-
-			// 2. Check max characters limit (-c)
-			if tidyMaxChars > 0 && len(trimmed) > tidyMaxChars {
-				charBloatCount++
-				continue
-			}
-
-			// 3. Check max words limit (-w)
-			if tidyMaxWords > 0 && len(strings.Fields(trimmed)) > tidyMaxWords {
-				wordBloatCount++
-				continue
-			}
-
-			seen[trimmed] = true
-			tidied = append(tidied, line)
-		}
-
-		if !clearYesFlag {
-			fmt.Printf("\n%s\n", color.New(color.Bold, color.Underline).Sprint("Shell History Analysis"))
-			fmt.Printf("  Target File:         %s\n", color.CyanString(histPath))
-			fmt.Printf("  • Total Raw Lines:   %d\n", len(fileLines))
-			fmt.Printf("  • Duplicate Lines:   %d\n", dupCount)
-			if tidyMaxChars > 0 {
-				fmt.Printf("  • Oversized (>%d ch): %d\n", tidyMaxChars, charBloatCount)
-			} else {
-				fmt.Printf("  • Oversized Chars:   Disabled (-c 0)\n")
-			}
-			if tidyMaxWords > 0 {
-				fmt.Printf("  • Oversized (>%d w):  %d\n", tidyMaxWords, wordBloatCount)
-			} else {
-				fmt.Printf("  • Oversized Words:   Disabled (-w 0)\n")
-			}
-			fmt.Printf("  • Optimized Result:  %d -> %d lines\n\n", len(fileLines), len(tidied))
-
-			if !askConfirmation("Apply history tidying now?") {
-				fmt.Println("Cancelled.")
-				return
-			}
-		}
-
-		outputContent := strings.Join(tidied, "\n") + "\n"
-		if errWrite := os.WriteFile(histPath, []byte(outputContent), 0644); errWrite != nil {
-			fmt.Printf(color.RedString("Error updating history file: %v\n"), errWrite)
-			return
-		}
-
-		fmt.Printf("%s", color.GreenString("Successfully tidied history file:\n"))
-		fmt.Printf("  Target: %s\n", histPath)
-		fmt.Printf("  • Removed duplicate entries: %d\n", dupCount)
-		if tidyMaxChars > 0 {
-			fmt.Printf("  • Removed oversized char lines (>%d chars): %d\n", tidyMaxChars, charBloatCount)
-		}
-		if tidyMaxWords > 0 {
-			fmt.Printf("  • Removed oversized word lines (>%d words): %d\n", tidyMaxWords, wordBloatCount)
-		}
-		fmt.Printf("  • Total lines: %d -> %d\n", len(fileLines), len(tidied))
-	},
-}
-
 func init() {
 	clearCmd.Flags().StringVarP(&clearActiveFlag, "active", "a", "", "Clear watch history matching path")
 	clearCmd.Flags().BoolVarP(&clearSavedFlag, "saved", "s", false, "Clear all saved commands")
@@ -789,12 +681,6 @@ func init() {
 	clearCmd.Flags().Lookup("restore").NoOptDefVal = "__LIST__"
 	clearCmd.Flags().BoolVarP(&clearListFlag, "list", "n", false, "List trashed commands")
 	clearCmd.Flags().BoolVarP(&clearYesFlag, "yes", "y", false, "Skip confirmation prompts")
-
-	tidyCmd.Flags().IntVarP(&tidyMaxLines, "max-lines", "n", 10, "Remove multiline commands exceeding N lines")
-	tidyCmd.Flags().IntVarP(&tidyMaxChars, "max-chars", "c", 200, "Remove command lines exceeding N characters (0 to disable)")
-	tidyCmd.Flags().IntVarP(&tidyMaxWords, "max-words", "w", 50, "Remove command lines exceeding N words (0 to disable)")
-	tidyCmd.Flags().BoolVarP(&clearYesFlag, "yes", "y", false, "Skip confirmation prompt")
-	clearCmd.AddCommand(tidyCmd)
 
 	rootCmd.AddCommand(clearCmd)
 }
